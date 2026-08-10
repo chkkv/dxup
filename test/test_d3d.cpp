@@ -158,7 +158,7 @@ static void faceCorners(float corner[4][3], float h, int axis, int sign) {
   }
 }
 
-static void addQuadFill(Vertex* verts, int* triCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
+static void addQuadFill(Vertex* verts, int* vertCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
   float corner[4][3];
   int order[6] = { 0, 1, 2, 0, 2, 3 };
   int i;
@@ -173,15 +173,15 @@ static void addQuadFill(Vertex* verts, int* triCount, float cx, float cy, float 
 
   for (i = 0; i < 6; i++) {
     int c = order[i];
-    verts[*triCount * 3 + i].x = cx + corner[c][0];
-    verts[*triCount * 3 + i].y = cy + corner[c][1];
-    verts[*triCount * 3 + i].z = cz + corner[c][2];
-    verts[*triCount * 3 + i].color = color;
+    verts[*vertCount + i].x = cx + corner[c][0];
+    verts[*vertCount + i].y = cy + corner[c][1];
+    verts[*vertCount + i].z = cz + corner[c][2];
+    verts[*vertCount + i].color = color;
   }
-  (*triCount)++;
+  (*vertCount) += 6;
 }
 
-static void addQuadBorder(Vertex* verts, int* lineCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
+static void addQuadBorder(Vertex* verts, int* vertCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
   float corner[4][3];
   int edges[8] = { 0, 1, 1, 2, 2, 3, 3, 0 };
   int i;
@@ -190,18 +190,18 @@ static void addQuadBorder(Vertex* verts, int* lineCount, float cx, float cy, flo
 
   for (i = 0; i < 8; i++) {
     int c = edges[i];
-    verts[*lineCount * 2 + i].x = cx + corner[c][0];
-    verts[*lineCount * 2 + i].y = cy + corner[c][1];
-    verts[*lineCount * 2 + i].z = cz + corner[c][2];
-    verts[*lineCount * 2 + i].color = color;
+    verts[*vertCount + i].x = cx + corner[c][0];
+    verts[*vertCount + i].y = cy + corner[c][1];
+    verts[*vertCount + i].z = cz + corner[c][2];
+    verts[*vertCount + i].color = color;
   }
-  (*lineCount)++;
+  (*vertCount) += 8;
 }
 
 static void buildRubiksCube(void) {
   int i, j, k;
-  g_triCount = 0;
-  g_lineCount = 0;
+  int fillVerts = 0;
+  int borderVerts = 0;
 
   for (i = -1; i <= 1; i++) {
     for (j = -1; j <= 1; j++) {
@@ -211,13 +211,16 @@ static void buildRubiksCube(void) {
         for (axis = 0; axis < 3; axis++) {
           for (sign = -1; sign <= 1; sign += 2) {
             int coord = axis == 0 ? i : (axis == 1 ? j : k);
-            addQuadFill(g_fillVerts, &g_triCount, cx, cy, cz, 0.42f, axis, sign, faceColor(coord, axis, sign));
-            addQuadBorder(g_borderVerts, &g_lineCount, cx, cy, cz, 0.45f, axis, sign, D3DCOLOR_XRGB(255, 255, 255));
+            addQuadFill(g_fillVerts, &fillVerts, cx, cy, cz, 0.42f, axis, sign, faceColor(coord, axis, sign));
+            addQuadBorder(g_borderVerts, &borderVerts, cx, cy, cz, 0.45f, axis, sign, D3DCOLOR_XRGB(255, 255, 255));
           }
         }
       }
     }
   }
+
+  g_triCount = fillVerts / 3;
+  g_lineCount = borderVerts / 2;
 }
 
 /* ---- Rendering ---- */
@@ -234,14 +237,21 @@ static void updateFps(void) {
 }
 
 static void drawHUD(void) {
+  static int gdiFailed = 0;
   IDirect3DSurface9* back = NULL;
   HDC hdc = NULL;
   char buf[64];
 
-  if (g_pDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back) != D3D_OK)
+  if (gdiFailed)
     return;
 
+  if (g_pDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back) != D3D_OK) {
+    gdiFailed = 1;
+    return;
+  }
+
   if (back->GetDC(&hdc) != D3D_OK) {
+    gdiFailed = 1;
     back->Release();
     return;
   }
