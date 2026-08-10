@@ -1,7 +1,5 @@
 project('dxup', ['c', 'cpp'], version : 'v0.00', meson_version : '>= 0.43')
 
-option('enable_tests', type : 'boolean', value : false, description : 'Enable tests')
-
 cpu_family = target_machine.cpu_family()
 add_project_arguments('-DNOMINMAX', language : 'cpp')
 
