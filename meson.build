@@ -15,6 +15,8 @@ endif
 
 if dxup_compiler.get_id() == 'msvc'
 	add_global_arguments('/std:' + dxup_cpp_std, language : 'cpp')
+else
+	add_project_arguments('-include', 'cstdint', language : 'cpp')
 endif
 
 
