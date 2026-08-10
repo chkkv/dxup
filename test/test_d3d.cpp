@@ -200,6 +200,8 @@ static void renderFrame(void) {
 
   g_pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(35, 35, 45), 1.0f, 0);
 
+  g_pDevice->BeginScene();
+
   g_pDevice->SetRenderState(D3DRS_LIGHTING, FALSE);
   g_pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
   g_pDevice->SetRenderState(D3DRS_ZENABLE, TRUE);
@@ -217,6 +219,8 @@ static void renderFrame(void) {
 
   g_pDevice->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
   g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, g_triCount, g_verts, sizeof(Vertex));
+
+  g_pDevice->EndScene();
 
   g_pDevice->Present(NULL, NULL, NULL, NULL);
 }
