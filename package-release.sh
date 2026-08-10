@@ -45,7 +45,8 @@ function build_arch {
   if command -v "$test_compiler" > /dev/null 2>&1; then
     "$test_compiler" "$DXUP_SRC_DIR/test/test_d3d.cpp" \
       -o "$DXUP_BUILD_DIR/x$1/test_d3d.exe" \
-      -ld3d9 -lgdi32 -luser32 -O2 -mwindows
+      -ld3d9 -lgdi32 -luser32 -O2 -mwindows \
+      -static -static-libgcc -static-libstdc++
   else
     echo "Warning: $test_compiler not found; skipping test app build."
   fi
