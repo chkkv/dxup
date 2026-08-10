@@ -34,6 +34,34 @@ namespace dxup {
     std::memset(&lights[0], 0, sizeof(lights));
     std::memset(&lightEnabled[0], 0, sizeof(lightEnabled));
 
+    renderState.fill(0);
+
+    // D3D9 default render states
+    renderState[D3DRS_ZWRITEENABLE] = TRUE;
+    renderState[D3DRS_CULLMODE] = D3DCULL_CCW;
+    renderState[D3DRS_LIGHTING] = TRUE;
+    renderState[D3DRS_FILLMODE] = D3DFILL_SOLID;
+    renderState[D3DRS_SHADEMODE] = D3DSHADE_GOURAUD;
+    renderState[D3DRS_ZFUNC] = D3DCMP_LESSEQUAL;
+    renderState[D3DRS_ALPHAFUNC] = D3DCMP_ALWAYS;
+    renderState[D3DRS_SRCBLEND] = D3DBLEND_ONE;
+    renderState[D3DRS_DESTBLEND] = D3DBLEND_ZERO;
+    renderState[D3DRS_COLORWRITEENABLE] = 0x0000000F;
+    renderState[D3DRS_COLORWRITEENABLE1] = 0x0000000F;
+    renderState[D3DRS_COLORWRITEENABLE2] = 0x0000000F;
+    renderState[D3DRS_COLORWRITEENABLE3] = 0x0000000F;
+    renderState[D3DRS_STENCILMASK] = 0xFFFFFFFF;
+    renderState[D3DRS_STENCILWRITEMASK] = 0xFFFFFFFF;
+    renderState[D3DRS_MULTISAMPLEMASK] = 0xFFFFFFFF;
+    renderState[D3DRS_BLENDFACTOR] = 0xFFFFFFFF;
+    renderState[D3DRS_COLORVERTEX] = TRUE;
+    renderState[D3DRS_DIFFUSEMATERIALSOURCE] = D3DMCS_COLOR1;
+    renderState[D3DRS_SPECULARMATERIALSOURCE] = D3DMCS_COLOR2;
+    renderState[D3DRS_AMBIENTMATERIALSOURCE] = D3DMCS_MATERIAL;
+    renderState[D3DRS_EMISSIVEMATERIALSOURCE] = D3DMCS_MATERIAL;
+    renderState[D3DRS_VERTEXBLEND] = D3DVBF_DISABLE;
+    renderState[D3DRS_POINTSIZE] = reinterpret::floatToDword(1.0f);
+
     if (stateBlockType != 0)
       this->capture(stateBlockType, false);
   }

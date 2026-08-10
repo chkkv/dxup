@@ -124,6 +124,16 @@ static void matPerspectiveFovLH(D3DMATRIX* m, float fovY, float aspect, float zn
   m->_44 = 0.0f;
 }
 
+static void matOrthoOffCenterLH(D3DMATRIX* m, float l, float r, float b, float t, float zn, float zf) {
+  matIdentity(m);
+  m->_11 = 2.0f / (r - l);
+  m->_22 = 2.0f / (t - b);
+  m->_33 = 1.0f / (zf - zn);
+  m->_41 = (l + r) / (l - r);
+  m->_42 = (t + b) / (b - t);
+  m->_43 = zn / (zn - zf);
+}
+
 /* ---- Rubik's cube ---- */
 
 static DWORD faceColor(int coord, int axis, int sign) {
@@ -236,34 +246,85 @@ static void updateFps(void) {
   }
 }
 
+/* 5x7 bitmap font (only the glyphs we need). */
+static const unsigned char* getGlyph(char c) {
+  static const unsigned char glyphs[][7] = {
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, /* space */
+    { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, /* 0 */
+    { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E }, /* 1 */
+    { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F }, /* 2 */
+    { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E }, /* 3 */
+    { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, /* 4 */
+    { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E }, /* 5 */
+    { 0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E }, /* 6 */
+    { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 }, /* 7 */
+    { 0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E }, /* 8 */
+    { 0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C }, /* 9 */
+    { 0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10 }, /* F */
+    { 0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10 }, /* P */
+    { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E }, /* S */
+    { 0x00, 0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C }, /* : */
+  };
+  static const char table[] = " 0123456789FPS:";
+  int i;
+  for (i = 0; i < (int)sizeof(table) - 1; i++) {
+    if (table[i] == c)
+      return glyphs[i];
+  }
+  return glyphs[0];
+}
+
+static void addScreenQuad(Vertex* verts, int* vertCount, float x, float y, float size, DWORD color) {
+  int i = *vertCount;
+  verts[i + 0].x = x;         verts[i + 0].y = y;         verts[i + 0].z = 0.0f; verts[i + 0].color = color;
+  verts[i + 1].x = x + size;  verts[i + 1].y = y;         verts[i + 1].z = 0.0f; verts[i + 1].color = color;
+  verts[i + 2].x = x + size;  verts[i + 2].y = y + size;  verts[i + 2].z = 0.0f; verts[i + 2].color = color;
+  verts[i + 3].x = x;         verts[i + 3].y = y;         verts[i + 3].z = 0.0f; verts[i + 3].color = color;
+  verts[i + 4].x = x + size;  verts[i + 4].y = y + size;  verts[i + 4].z = 0.0f; verts[i + 4].color = color;
+  verts[i + 5].x = x;         verts[i + 5].y = y + size;  verts[i + 5].z = 0.0f; verts[i + 5].color = color;
+  (*vertCount) += 6;
+}
+
 static void drawHUD(void) {
-  static int gdiFailed = 0;
-  IDirect3DSurface9* back = NULL;
-  HDC hdc = NULL;
-  char buf[64];
-
-  if (gdiFailed)
-    return;
-
-  if (g_pDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back) != D3D_OK) {
-    gdiFailed = 1;
-    return;
-  }
-
-  if (back->GetDC(&hdc) != D3D_OK) {
-    gdiFailed = 1;
-    back->Release();
-    return;
-  }
+  static Vertex hudVerts[16 * 35 * 6];
+  D3DMATRIX proj, view, world;
+  RECT rc;
+  char buf[16];
+  int len, i, x, y;
+  int vertCount = 0;
+  const float scale = 3.0f;
+  const float startX = 10.0f;
+  const float startY = 10.0f;
+  const DWORD textColor = D3DCOLOR_XRGB(255, 255, 0);
 
   sprintf(buf, "FPS: %d", g_fps);
+  len = (int)strlen(buf);
 
-  SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, RGB(255, 255, 0));
-  TextOutA(hdc, 10, 10, buf, (int)strlen(buf));
+  for (i = 0; i < len; i++) {
+    const unsigned char* glyph = getGlyph(buf[i]);
+    for (y = 0; y < 7; y++) {
+      for (x = 0; x < 5; x++) {
+        if (glyph[y] & (1u << (4 - x))) {
+          float px = startX + (float)i * 6.0f * scale + (float)x * scale;
+          float py = startY + (float)y * scale;
+          addScreenQuad(hudVerts, &vertCount, px, py, scale, textColor);
+        }
+      }
+    }
+  }
 
-  back->ReleaseDC(hdc);
-  back->Release();
+  GetClientRect(g_hWnd, &rc);
+
+  matOrthoOffCenterLH(&proj, 0.0f, (float)rc.right, (float)rc.bottom, 0.0f, 0.0f, 1.0f);
+  matIdentity(&view);
+  matIdentity(&world);
+
+  g_pDevice->SetTransform(D3DTS_PROJECTION, &proj);
+  g_pDevice->SetTransform(D3DTS_VIEW, &view);
+  g_pDevice->SetTransform(D3DTS_WORLD, &world);
+
+  g_pDevice->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
+  g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, vertCount / 3, hudVerts, sizeof(Vertex));
 }
 
 static void renderFrame(void) {
@@ -341,6 +402,7 @@ static HRESULT initD3D(HWND hWnd) {
   pp.BackBufferCount = 1;
   pp.EnableAutoDepthStencil = TRUE;
   pp.AutoDepthStencilFormat = D3DFMT_D16;
+  pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
 
   if (g_pD3D->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hWnd,
         D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &g_pDevice) != D3D_OK) {
