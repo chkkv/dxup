@@ -36,6 +36,19 @@ function build_arch {
   mkdir "$DXUP_BUILD_DIR/x$1"
 
   cp "$DXUP_BUILD_DIR/install.$1/bin/d3d9.dll" "$DXUP_BUILD_DIR/x$1/d3d9.dll"
+
+  local test_compiler="x86_64-w64-mingw32-g++"
+  if [ "$1" = "32" ]; then
+    test_compiler="i686-w64-mingw32-g++"
+  fi
+
+  if command -v "$test_compiler" > /dev/null 2>&1; then
+    "$test_compiler" "$DXUP_SRC_DIR/test/test_d3d.cpp" \
+      -o "$DXUP_BUILD_DIR/x$1/test_d3d.exe" \
+      -ld3d9 -lgdi32 -luser32 -O2 -mwindows
+  else
+    echo "Warning: $test_compiler not found; skipping test app build."
+  fi
   
   rm -R "$DXUP_BUILD_DIR/build.$1"
   rm -R "$DXUP_BUILD_DIR/install.$1"

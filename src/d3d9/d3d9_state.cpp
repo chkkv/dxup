@@ -766,7 +766,7 @@ namespace dxup {
       viewMatrix = *pMatrix;
     else if (State == D3DTS_PROJECTION)
       projMatrix = *pMatrix;
-    else if (State >= D3DTS_WORLD && State < D3DTS_TEXTURE0)
+    else if (State >= D3DTS_WORLD && State < 512)
       worldMatrix = *pMatrix;
     else
       return log::d3derr(D3DERR_INVALIDCALL, "SetTransform: unsupported transform state %d.", (int)State);
