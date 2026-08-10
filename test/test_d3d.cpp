@@ -3,16 +3,18 @@
  *
  * Draws a rubik's cube (3x3x3, standard face colours) using the D3D9
  * fixed-function pipeline (FVF + SetTransform + DrawPrimitiveUP) and
- * rotates it clockwise around the Y axis.
+ * rotates it clockwise around the Y axis. Each sticker is drawn as a
+ * filled square with a white border.
  *
  * Build (mingw-w64):
- *   x86_64-w64-mingw32-gcc test_d3d.c -o test_d3d.exe -ld3d9 -lgdi32 -luser32 -O2 -mwindows
- *   i686-w64-mingw32-gcc   test_d3d.c -o test_d3d.exe -ld3d9 -lgdi32 -luser32 -O2 -mwindows
+ *   x86_64-w64-mingw32-g++ test_d3d.cpp -o test_d3d.exe -ld3d9 -lgdi32 -luser32 -O2 -mwindows
+ *   i686-w64-mingw32-g++   test_d3d.cpp -o test_d3d.exe -ld3d9 -lgdi32 -luser32 -O2 -mwindows
  */
 
 #include <windows.h>
 #include <d3d9.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef struct {
@@ -24,8 +26,18 @@ static IDirect3D9* g_pD3D = NULL;
 static IDirect3DDevice9* g_pDevice = NULL;
 static HWND g_hWnd = NULL;
 
-static Vertex g_verts[972];
+#define MAX_FILL_VERTS  (27 * 6 * 6)
+#define MAX_BORDER_VERTS (27 * 6 * 8)
+
+static Vertex g_fillVerts[MAX_FILL_VERTS];
 static int g_triCount = 0;
+
+static Vertex g_borderVerts[MAX_BORDER_VERTS];
+static int g_lineCount = 0;
+
+static DWORD g_lastFpsTime = 0;
+static int g_frameCount = 0;
+static int g_fps = 0;
 
 /* ---- Matrix helpers (row-major, D3DX-compatible) ---- */
 
@@ -123,11 +135,7 @@ static DWORD faceColor(int coord, int axis, int sign) {
   return D3DCOLOR_XRGB(0, 0, 0);
 }
 
-static void addQuad(Vertex* verts, int* triCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
-  float corner[4][3];
-  int order[6] = { 0, 1, 2, 0, 2, 3 };
-  int i;
-
+static void faceCorners(float corner[4][3], float h, int axis, int sign) {
   switch (axis) {
   case 0: /* X */
     corner[0][0] = sign * h; corner[0][1] = -h; corner[0][2] = -h;
@@ -148,6 +156,14 @@ static void addQuad(Vertex* verts, int* triCount, float cx, float cy, float cz, 
     corner[3][0] =  h; corner[3][1] = -h; corner[3][2] = sign * h;
     break;
   }
+}
+
+static void addQuadFill(Vertex* verts, int* triCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
+  float corner[4][3];
+  int order[6] = { 0, 1, 2, 0, 2, 3 };
+  int i;
+
+  faceCorners(corner, h, axis, sign);
 
   if (sign < 0) {
     int rev[6] = { 0, 2, 1, 0, 3, 2 };
@@ -165,26 +181,80 @@ static void addQuad(Vertex* verts, int* triCount, float cx, float cy, float cz, 
   (*triCount)++;
 }
 
+static void addQuadBorder(Vertex* verts, int* lineCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
+  float corner[4][3];
+  int edges[8] = { 0, 1, 1, 2, 2, 3, 3, 0 };
+  int i;
+
+  faceCorners(corner, h, axis, sign);
+
+  for (i = 0; i < 8; i++) {
+    int c = edges[i];
+    verts[*lineCount * 2 + i].x = cx + corner[c][0];
+    verts[*lineCount * 2 + i].y = cy + corner[c][1];
+    verts[*lineCount * 2 + i].z = cz + corner[c][2];
+    verts[*lineCount * 2 + i].color = color;
+  }
+  (*lineCount)++;
+}
+
 static void buildRubiksCube(void) {
   int i, j, k;
   g_triCount = 0;
+  g_lineCount = 0;
 
   for (i = -1; i <= 1; i++) {
     for (j = -1; j <= 1; j++) {
       for (k = -1; k <= 1; k++) {
         float cx = (float)i, cy = (float)j, cz = (float)k;
-        addQuad(g_verts, &g_triCount, cx, cy, cz, 0.45f, 0, +1, faceColor(i, 0, +1));
-        addQuad(g_verts, &g_triCount, cx, cy, cz, 0.45f, 0, -1, faceColor(i, 0, -1));
-        addQuad(g_verts, &g_triCount, cx, cy, cz, 0.45f, 1, +1, faceColor(j, 1, +1));
-        addQuad(g_verts, &g_triCount, cx, cy, cz, 0.45f, 1, -1, faceColor(j, 1, -1));
-        addQuad(g_verts, &g_triCount, cx, cy, cz, 0.45f, 2, +1, faceColor(k, 2, +1));
-        addQuad(g_verts, &g_triCount, cx, cy, cz, 0.45f, 2, -1, faceColor(k, 2, -1));
+        int axis, sign;
+        for (axis = 0; axis < 3; axis++) {
+          for (sign = -1; sign <= 1; sign += 2) {
+            int coord = axis == 0 ? i : (axis == 1 ? j : k);
+            addQuadFill(g_fillVerts, &g_triCount, cx, cy, cz, 0.42f, axis, sign, faceColor(coord, axis, sign));
+            addQuadBorder(g_borderVerts, &g_lineCount, cx, cy, cz, 0.45f, axis, sign, D3DCOLOR_XRGB(255, 255, 255));
+          }
+        }
       }
     }
   }
 }
 
 /* ---- Rendering ---- */
+
+static void updateFps(void) {
+  DWORD now = GetTickCount();
+  g_frameCount++;
+
+  if (now - g_lastFpsTime >= 1000) {
+    g_fps = (int)((g_frameCount * 1000u) / (now - g_lastFpsTime));
+    g_lastFpsTime = now;
+    g_frameCount = 0;
+  }
+}
+
+static void drawHUD(void) {
+  IDirect3DSurface9* back = NULL;
+  HDC hdc = NULL;
+  char buf[64];
+
+  if (g_pDevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back) != D3D_OK)
+    return;
+
+  if (back->GetDC(&hdc) != D3D_OK) {
+    back->Release();
+    return;
+  }
+
+  sprintf(buf, "FPS: %d", g_fps);
+
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(255, 255, 0));
+  TextOutA(hdc, 10, 10, buf, (int)strlen(buf));
+
+  back->ReleaseDC(hdc);
+  back->Release();
+}
 
 static void renderFrame(void) {
   float angle = (float)GetTickCount() / 1000.0f;
@@ -206,6 +276,7 @@ static void renderFrame(void) {
   g_pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
   g_pDevice->SetRenderState(D3DRS_ZENABLE, TRUE);
   g_pDevice->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+  g_pDevice->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
 
   matPerspectiveFovLH(&proj, 60.0f * 3.14159265f / 180.0f, aspect, 0.1f, 100.0f);
   g_pDevice->SetTransform(D3DTS_PROJECTION, &proj);
@@ -218,9 +289,13 @@ static void renderFrame(void) {
   g_pDevice->SetTransform(D3DTS_WORLD, &world);
 
   g_pDevice->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
-  g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, g_triCount, g_verts, sizeof(Vertex));
+  g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, g_triCount, g_fillVerts, sizeof(Vertex));
+  g_pDevice->DrawPrimitiveUP(D3DPT_LINELIST, g_lineCount, g_borderVerts, sizeof(Vertex));
 
   g_pDevice->EndScene();
+
+  updateFps();
+  drawHUD();
 
   g_pDevice->Present(NULL, NULL, NULL, NULL);
 }

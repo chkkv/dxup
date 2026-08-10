@@ -837,6 +837,8 @@ namespace dxup {
 
     if (m_state->dirtyFlags & dirtyFlags::pixelShader)
       updatePixelShader();
+    else if (m_state->pixelShader == nullptr && m_state->vertexDecl != nullptr)
+      updatePixelShader();
   }
 
   //
