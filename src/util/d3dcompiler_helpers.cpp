@@ -32,6 +32,24 @@ namespace dxup {
       return true;
     }
 
+    bool compile(HRESULT* result, LPCVOID pSrcData, SIZE_T SrcDataSize, LPCSTR pSourceName, const D3D_SHADER_MACRO* pDefines, LPCSTR pEntrypoint, LPCSTR pTarget, UINT Flags, ID3DBlob** ppCode, ID3DBlob** ppErrorMsgs) {
+      loadModule();
+
+      if (!d3dcompilerModule)
+        return false;
+
+      typedef HRESULT(WINAPI *D3DCompileFunc)(LPCVOID pSrcData, SIZE_T SrcDataSize, LPCSTR pSourceName, const D3D_SHADER_MACRO* pDefines, ID3DInclude* pInclude, LPCSTR pEntrypoint, LPCSTR pTarget, UINT Flags1, UINT Flags2, ID3DBlob** ppCode, ID3DBlob** ppErrorMsgs);
+      D3DCompileFunc D3DCompileDynamic = (D3DCompileFunc)GetProcAddress(d3dcompilerModule, "D3DCompile");
+
+      if (D3DCompileDynamic == nullptr)
+        return false;
+
+      HRESULT foundResult = D3DCompileDynamic(pSrcData, SrcDataSize, pSourceName, pDefines, nullptr, pEntrypoint, pTarget, Flags, 0, ppCode, ppErrorMsgs);
+      *result = foundResult;
+
+      return true;
+    }
+
   }
 
   namespace d3dx {

@@ -88,6 +88,19 @@ namespace dxup {
     HRESULT GetViewport(D3DVIEWPORT9* pViewport);
     HRESULT SetViewport(CONST D3DVIEWPORT9* pViewport);
 
+    HRESULT SetTransform(D3DTRANSFORMSTATETYPE State, const D3DMATRIX* pMatrix);
+    HRESULT GetTransform(D3DTRANSFORMSTATETYPE State, D3DMATRIX* pMatrix);
+
+    HRESULT SetMaterial(const D3DMATERIAL9* pMaterial);
+    HRESULT GetMaterial(D3DMATERIAL9* pMaterial);
+
+    HRESULT SetLight(DWORD Index, const D3DLIGHT9* pLight);
+    HRESULT GetLight(DWORD Index, D3DLIGHT9* pLight);
+    HRESULT LightEnable(DWORD Index, BOOL Enable);
+    HRESULT GetLightEnable(DWORD Index, BOOL* pEnable);
+
+    HRESULT SetFVF(DWORD fvf);
+
     void capture(uint32_t stateBlockType, bool recapture);
     void apply();
 
@@ -141,6 +154,16 @@ namespace dxup {
 
     RECT scissorRect;
     bool scissorRectCaptured = false;
+
+    DWORD fvf = 0;
+
+    D3DMATRIX worldMatrix;
+    D3DMATRIX viewMatrix;
+    D3DMATRIX projMatrix;
+
+    D3DMATERIAL9 material;
+    std::array<D3DLIGHT9, 8> lights;
+    std::array<BOOL, 8> lightEnabled;
 
     void captureRenderState(D3DRENDERSTATETYPE state, bool recapture = false);
     void captureTextureStageState(uint32_t stage, D3DTEXTURESTAGESTATETYPE type, bool recapture = false);

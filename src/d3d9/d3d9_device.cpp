@@ -16,6 +16,7 @@
 #include "d3d9_query.h"
 #include "d3d9_state.h"
 #include "d3d9_renderer.h"
+#include "d3d9_ffp.h"
 #include <d3d11_4.h>
 #include <float.h>
 
@@ -931,15 +932,11 @@ namespace dxup {
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::SetTransform(D3DTRANSFORMSTATETYPE State, CONST D3DMATRIX* pMatrix) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::SetTransform");
-    return D3D_OK;
+    return GetEditState()->SetTransform(State, pMatrix);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::GetTransform(D3DTRANSFORMSTATETYPE State, D3DMATRIX* pMatrix) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::GetTransform");
-    return D3D_OK;
+    return m_state->GetTransform(State, pMatrix);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::MultiplyTransform(D3DTRANSFORMSTATETYPE TransformState, CONST D3DMATRIX* pMatrix) {
     CriticalSection cs(this);
@@ -958,39 +955,27 @@ namespace dxup {
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::SetMaterial(CONST D3DMATERIAL9* pMaterial) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::SetMaterial");
-    return D3D_OK;
+    return GetEditState()->SetMaterial(pMaterial);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::GetMaterial(D3DMATERIAL9* pMaterial) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::GetMaterial");
-    return D3D_OK;
+    return m_state->GetMaterial(pMaterial);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::SetLight(DWORD Index, CONST D3DLIGHT9* pLight) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::SetLight");
-    return D3D_OK;
+    return GetEditState()->SetLight(Index, pLight);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::GetLight(DWORD Index, D3DLIGHT9* pLight) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::GetLight");
-    return D3D_OK;
+    return m_state->GetLight(Index, pLight);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::LightEnable(DWORD Index, BOOL Enable) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::LightEnable");
-    return D3D_OK;
+    return GetEditState()->LightEnable(Index, Enable);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::GetLightEnable(DWORD Index, BOOL* pEnable) {
     CriticalSection cs(this);
-
-    log::stub("Direct3DDevice9Ex::GetLightEnable");
-    return D3D_OK;
+    return m_state->GetLightEnable(Index, pEnable);
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::SetClipPlane(DWORD Index, CONST float* pPlane) {
     CriticalSection cs(this);
@@ -1233,8 +1218,31 @@ namespace dxup {
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::SetFVF(DWORD FVF) {
     CriticalSection cs(this);
 
+    if (m_fvf == FVF)
+      return D3D_OK;
+
     m_fvf = FVF;
-    return D3D_OK;
+
+    HRESULT result = GetEditState()->SetFVF(FVF);
+    if (FAILED(result))
+      return result;
+
+    if (FVF == 0)
+      return D3D_OK;
+
+    if (!ffp::fvfHasPosition(FVF))
+      return log::d3derr(D3DERR_INVALIDCALL, "SetFVF: unsupported FVF %lu (no position).", FVF);
+
+    std::vector<D3D11_INPUT_ELEMENT_DESC> inputElements;
+    std::vector<D3DVERTEXELEMENT9> d3d9Elements;
+
+    ffp::buildFVFDeclaration(FVF, inputElements, d3d9Elements);
+
+    Direct3DVertexDeclaration9* decl = new Direct3DVertexDeclaration9(this, inputElements, d3d9Elements);
+    result = GetEditState()->SetVertexDeclaration(decl);
+    decl->Release();
+
+    return result;
   }
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::GetFVF(DWORD* pFVF) {
     CriticalSection cs(this);

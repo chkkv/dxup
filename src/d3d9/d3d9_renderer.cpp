@@ -5,6 +5,7 @@
 #include "shaders/blit.ps.dxbc.h"
 
 #include <cfloat>
+#include <utility>
 
 namespace dxup {
 
@@ -320,34 +321,187 @@ namespace dxup {
     m_context->RSSetViewports(1, &viewport);
   }
 
-  void D3D9ImmediateRenderer::updateVertexShaderAndInputLayout() {
-    if (m_state->vertexDecl == nullptr || m_state->vertexShader == nullptr)
-      return;
+  static D3DMATRIX mulMatrix(const D3DMATRIX& a, const D3DMATRIX& b) {
+    D3DMATRIX m;
+    for (uint32_t row = 0; row < 4; row++) {
+      for (uint32_t col = 0; col < 4; col++) {
+        float sum = 0.0f;
+        for (uint32_t k = 0; k < 4; k++)
+          sum += (&a._11)[row * 4 + k] * (&b._11)[k * 4 + col];
+        (&m._11)[row * 4 + col] = sum;
+      }
+    }
+    return m;
+  }
 
-    auto& elements = m_state->vertexDecl->GetD3D11Descs();
-    auto* vertexShdrBytecode = m_state->vertexShader->GetTranslation();
+  HRESULT D3D9ImmediateRenderer::getFFPVS(const ffp::FFPVertexInputs& inputs, ID3D11VertexShader** outShader, ID3DBlob** outBytecode) {
+    *outShader = nullptr;
+    if (outBytecode != nullptr)
+      *outBytecode = nullptr;
 
-    ID3D11InputLayout* layout = m_state->vertexShader->GetLinkedInput(m_state->vertexDecl.ptr());
+    for (FFPVertexShaderEntry& entry : m_ffpVSs) {
+      if (entry.inputs == inputs) {
+        *outShader = entry.shader.ptr();
 
-    if (layout == nullptr) {
-      HRESULT result = m_device->CreateInputLayout(&elements[0], elements.size(), vertexShdrBytecode->getBytecode(), vertexShdrBytecode->getByteSize(), &layout);
-
-      if (!FAILED(result)) {
-        m_state->vertexShader->LinkInput(layout, m_state->vertexDecl.ptr());
-
-        layout->Release();
+        if (outBytecode != nullptr) {
+          *outBytecode = entry.bytecode.ptr();
+          (*outBytecode)->AddRef();
+        }
+        return D3D_OK;
       }
     }
 
-    if (layout == nullptr)
+    FFPVertexShaderEntry entry;
+    entry.inputs = inputs;
+
+    HRESULT result = ffp::compileVertexShader(m_device, inputs, &entry.shader, &entry.bytecode);
+    if (FAILED(result))
+      return result;
+
+    m_ffpVSs.push_back(std::move(entry));
+
+    FFPVertexShaderEntry& cached = m_ffpVSs.back();
+    *outShader = cached.shader.ptr();
+
+    if (outBytecode != nullptr) {
+      *outBytecode = cached.bytecode.ptr();
+      (*outBytecode)->AddRef();
+    }
+    return D3D_OK;
+  }
+
+  ID3D11PixelShader* D3D9ImmediateRenderer::getFFPPS(bool hasTexture) {
+    Com<ID3D11PixelShader>& ps = hasTexture ? m_ffpPSTextured : m_ffpPS;
+
+    if (ps == nullptr) {
+      ID3D11PixelShader* shader = nullptr;
+      HRESULT result = ffp::compilePixelShader(m_device, hasTexture, &shader);
+      if (FAILED(result)) {
+        log::warn("getFFPPS: failed to compile FFP pixel shader.");
+        return nullptr;
+      }
+      ps = shader;
+    }
+
+    return ps.ptr();
+  }
+
+  void D3D9ImmediateRenderer::injectFFPConstants() {
+    D3D9ShaderConstants& vs = m_state->vsConstants;
+
+    const D3DMATERIAL9& mat = m_state->material;
+    const bool lighting = m_state->renderState[D3DRS_LIGHTING] != FALSE;
+    const D3DCOLOR ambientState = (D3DCOLOR)m_state->renderState[D3DRS_AMBIENT];
+
+    // c0-c3: world * view * proj
+    D3DMATRIX wvp = mulMatrix(mulMatrix(m_state->worldMatrix, m_state->viewMatrix), m_state->projMatrix);
+    float* m = (float*)&vs.floatConstants[0];
+    m[0] = wvp._11; m[1] = wvp._12; m[2] = wvp._13; m[3] = wvp._14;
+    m[4] = wvp._21; m[5] = wvp._22; m[6] = wvp._23; m[7] = wvp._24;
+    m[8] = wvp._31; m[9] = wvp._32; m[10] = wvp._33; m[11] = wvp._34;
+    m[12] = wvp._41; m[13] = wvp._42; m[14] = wvp._43; m[15] = wvp._44;
+
+    // c4: light direction in world space (points in the direction light travels)
+    Vector<float, 4> lightDir = { 0.0f, 0.0f, -1.0f, 0.0f };
+    for (uint32_t i = 0; i < m_state->lights.size(); i++) {
+      if (m_state->lightEnabled[i] && m_state->lights[i].Type == D3DLIGHT_DIRECTIONAL) {
+        lightDir = { m_state->lights[i].Direction.x, m_state->lights[i].Direction.y, m_state->lights[i].Direction.z, 0.0f };
+        break;
+      }
+    }
+    vs.floatConstants[4] = lightDir;
+
+    // c5: material diffuse
+    vs.floatConstants[5] = { mat.Diffuse.r, mat.Diffuse.g, mat.Diffuse.b, mat.Diffuse.a };
+
+    // c6: ambient, c7: light color
+    Vector<float, 4> ambient = { 1.0f, 1.0f, 1.0f, 0.0f };
+    Vector<float, 4> lightColor = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    if (lighting) {
+      float a[4];
+      convert::color(ambientState, a);
+      ambient = { a[0] * mat.Ambient.r, a[1] * mat.Ambient.g, a[2] * mat.Ambient.b, 0.0f };
+
+      bool foundLight = false;
+      for (uint32_t i = 0; i < m_state->lights.size(); i++) {
+        if (m_state->lightEnabled[i]) {
+          lightColor = { m_state->lights[i].Diffuse.r, m_state->lights[i].Diffuse.g, m_state->lights[i].Diffuse.b, 0.0f };
+          foundLight = true;
+          break;
+        }
+      }
+
+      if (!foundLight)
+        lightColor = { 1.0f, 1.0f, 1.0f, 0.0f };
+    }
+
+    vs.floatConstants[6] = ambient;
+    vs.floatConstants[7] = lightColor;
+
+    // c8-c11: world matrix (for normal transformation)
+    float* w = (float*)&vs.floatConstants[8];
+    w[0] = m_state->worldMatrix._11; w[1] = m_state->worldMatrix._12; w[2] = m_state->worldMatrix._13; w[3] = m_state->worldMatrix._14;
+    w[4] = m_state->worldMatrix._21; w[5] = m_state->worldMatrix._22; w[6] = m_state->worldMatrix._23; w[7] = m_state->worldMatrix._24;
+    w[8] = m_state->worldMatrix._31; w[9] = m_state->worldMatrix._32; w[10] = m_state->worldMatrix._33; w[11] = m_state->worldMatrix._34;
+    w[12] = m_state->worldMatrix._41; w[13] = m_state->worldMatrix._42; w[14] = m_state->worldMatrix._43; w[15] = m_state->worldMatrix._44;
+  }
+
+  void D3D9ImmediateRenderer::updateVertexShaderAndInputLayout() {
+    if (m_state->vertexDecl == nullptr)
       return;
+
+    const bool ffp = m_state->vertexShader == nullptr;
+
+    auto& elements = m_state->vertexDecl->GetD3D11Descs();
+
+    ID3D11VertexShader* vertexShader = nullptr;
+    const void* bytecode = nullptr;
+    UINT bytecodeSize = 0;
+    Com<ID3DBlob> ffpBytecode;
+
+    if (ffp) {
+      ffp::FFPVertexInputs inputs = ffp::deriveVertexInputs(elements);
+
+      if (!inputs.position)
+        return;
+
+      if (FAILED(getFFPVS(inputs, &vertexShader, &ffpBytecode)))
+        return;
+
+      bytecode = ffpBytecode->GetBufferPointer();
+      bytecodeSize = ffpBytecode->GetBufferSize();
+    } else {
+      vertexShader = m_state->vertexShader->GetD3D11Shader();
+      auto* vertexShdrBytecode = m_state->vertexShader->GetTranslation();
+      bytecode = vertexShdrBytecode->getBytecode();
+      bytecodeSize = vertexShdrBytecode->getByteSize();
+    }
+
+    ID3D11InputLayout* layout = nullptr;
+    if (!ffp)
+      layout = m_state->vertexShader->GetLinkedInput(m_state->vertexDecl.ptr());
+
+    if (layout == nullptr) {
+      HRESULT result = m_device->CreateInputLayout(&elements[0], elements.size(), bytecode, bytecodeSize, &layout);
+
+      if (FAILED(result)) {
+        log::warn("updateVertexShaderAndInputLayout: failed to create input layout.");
+        return;
+      }
+
+      if (!ffp)
+        m_state->vertexShader->LinkInput(layout, m_state->vertexDecl.ptr());
+    }
 
     m_state->dirtyFlags &= ~dirtyFlags::vertexDecl;
     m_state->dirtyFlags &= ~dirtyFlags::vertexShader;
 
     m_context->IASetInputLayout(layout);
+    m_context->VSSetShader(vertexShader, nullptr, 0);
 
-    m_context->VSSetShader(m_state->vertexShader->GetD3D11Shader(), nullptr, 0);
+    if (layout != nullptr)
+      layout->Release();
   }
   void D3D9ImmediateRenderer::updateDepthStencilState() {
     D3D11_DEPTH_STENCIL_DESC desc;
@@ -581,10 +735,22 @@ namespace dxup {
     m_state->dirtyFlags &= ~dirtyFlags::renderTargets;
   }
   void D3D9ImmediateRenderer::updatePixelShader() {
+    ID3D11PixelShader* ps = nullptr;
+
     if (m_state->pixelShader != nullptr)
-      m_context->PSSetShader(m_state->pixelShader->GetD3D11Shader(), nullptr, 0);
-    else
-      m_context->PSSetShader(nullptr, nullptr, 0);
+      ps = m_state->pixelShader->GetD3D11Shader();
+    else {
+      bool hasTexture = false;
+
+      if (m_state->vertexDecl != nullptr) {
+        ffp::FFPVertexInputs inputs = ffp::deriveVertexInputs(m_state->vertexDecl->GetD3D11Descs());
+        hasTexture = inputs.tex0 && m_state->textures[0] != nullptr;
+      }
+
+      ps = getFFPPS(hasTexture);
+    }
+
+    m_context->PSSetShader(ps, nullptr, 0);
 
     m_state->dirtyFlags &= ~dirtyFlags::pixelShader;
   }
@@ -615,8 +781,10 @@ namespace dxup {
     m_state->dirtyFlags &= ~dirtyFlags::indexBuffer;
   }
   void D3D9ImmediateRenderer::updateVertexConstants() {
+    if (m_state->vertexShader == nullptr)
+      injectFFPConstants();
+
     m_vsConstants.update(m_state->vsConstants);
-    m_state->dirtyFlags &= ~dirtyFlags::vsConstants;
   }
   void D3D9ImmediateRenderer::updatePixelConstants() {
     m_psConstants.update(m_state->psConstants);
@@ -639,6 +807,8 @@ namespace dxup {
       updateIndexBuffer();
 
     if (m_state->dirtyFlags & dirtyFlags::vsConstants)
+      updateVertexConstants();
+    else if (m_state->vertexShader == nullptr && m_state->vertexDecl != nullptr)
       updateVertexConstants();
 
     if (m_state->dirtyFlags & dirtyFlags::psConstants)

@@ -3,6 +3,8 @@
 #include "d3d9_base.h"
 #include "d3d9_state.h"
 #include "d3d11_dynamic_buffer.h"
+#include "d3d9_ffp.h"
+#include <vector>
 
 namespace dxup {
 
@@ -26,12 +28,22 @@ namespace dxup {
 
   private:
 
+    struct FFPVertexShaderEntry {
+      ffp::FFPVertexInputs inputs;
+      Com<ID3D11VertexShader> shader;
+      Com<ID3DBlob> bytecode;
+    };
+
     HRESULT drawTriangleFan(bool indexed, D3DPRIMITIVETYPE PrimitiveType, UINT StartIndex, UINT PrimitiveCount, UINT BaseVertexIndex);
 
     bool canDraw();
 
     bool preDraw(); // Returns CanDraw
     void postDraw();
+
+    HRESULT getFFPVS(const ffp::FFPVertexInputs& inputs, ID3D11VertexShader** outShader, ID3DBlob** outBytecode);
+    ID3D11PixelShader* getFFPPS(bool hasTexture);
+    void injectFFPConstants();
 
     void updateViewport();
     void updateScissorRect();
@@ -66,6 +78,10 @@ namespace dxup {
     Com<ID3D11SamplerState> m_blitSampler;
     Com<ID3D11VertexShader> m_blitVS;
     Com<ID3D11PixelShader> m_blitPS;
+
+    std::vector<FFPVertexShaderEntry> m_ffpVSs;
+    Com<ID3D11PixelShader> m_ffpPS;
+    Com<ID3D11PixelShader> m_ffpPSTextured;
   };
 
 }

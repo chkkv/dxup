@@ -20,6 +20,20 @@ namespace dxup {
     std::memset(vertexOffsets.data(), 0, sizeof(UINT) * vertexOffsets.size());
     std::memset(vertexStrides.data(), 0, sizeof(UINT) * vertexStrides.size());
 
+    fvf = 0;
+
+    std::memset(&worldMatrix, 0, sizeof(worldMatrix));
+    worldMatrix._11 = worldMatrix._22 = worldMatrix._33 = worldMatrix._44 = 1.0f;
+    viewMatrix = worldMatrix;
+    projMatrix = worldMatrix;
+
+    std::memset(&material, 0, sizeof(material));
+    material.Diffuse = { 1.0f, 1.0f, 1.0f, 1.0f };
+    material.Ambient = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+    std::memset(&lights[0], 0, sizeof(lights));
+    std::memset(&lightEnabled[0], 0, sizeof(lightEnabled));
+
     if (stateBlockType != 0)
       this->capture(stateBlockType, false);
   }
@@ -741,6 +755,105 @@ namespace dxup {
     viewportCaptured = true;
 
     dirtyFlags |= dirtyFlags::viewport;
+    return D3D_OK;
+  }
+
+  HRESULT D3D9State::SetTransform(D3DTRANSFORMSTATETYPE State, const D3DMATRIX* pMatrix) {
+    if (pMatrix == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "SetTransform: pMatrix was nullptr.");
+
+    if (State == D3DTS_VIEW)
+      viewMatrix = *pMatrix;
+    else if (State == D3DTS_PROJECTION)
+      projMatrix = *pMatrix;
+    else if (State >= D3DTS_WORLD && State < D3DTS_TEXTURE0)
+      worldMatrix = *pMatrix;
+    else
+      return log::d3derr(D3DERR_INVALIDCALL, "SetTransform: unsupported transform state %d.", (int)State);
+
+    dirtyFlags |= dirtyFlags::vsConstants;
+    return D3D_OK;
+  }
+  HRESULT D3D9State::GetTransform(D3DTRANSFORMSTATETYPE State, D3DMATRIX* pMatrix) {
+    if (pMatrix == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "GetTransform: pMatrix was nullptr.");
+
+    if (State == D3DTS_VIEW)
+      *pMatrix = viewMatrix;
+    else if (State == D3DTS_PROJECTION)
+      *pMatrix = projMatrix;
+    else if (State >= D3DTS_WORLD && State < D3DTS_TEXTURE0)
+      *pMatrix = worldMatrix;
+    else
+      return log::d3derr(D3DERR_INVALIDCALL, "GetTransform: unsupported transform state %lu.", State);
+
+    return D3D_OK;
+  }
+
+  HRESULT D3D9State::SetMaterial(const D3DMATERIAL9* pMaterial) {
+    if (pMaterial == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "SetMaterial: pMaterial was nullptr.");
+
+    material = *pMaterial;
+
+    dirtyFlags |= dirtyFlags::vsConstants;
+    return D3D_OK;
+  }
+  HRESULT D3D9State::GetMaterial(D3DMATERIAL9* pMaterial) {
+    if (pMaterial == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "GetMaterial: pMaterial was nullptr.");
+
+    *pMaterial = material;
+    return D3D_OK;
+  }
+
+  HRESULT D3D9State::SetLight(DWORD Index, const D3DLIGHT9* pLight) {
+    if (Index >= lights.size())
+      return log::d3derr(D3DERR_INVALIDCALL, "SetLight: light index %lu out of bounds.", Index);
+
+    if (pLight == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "SetLight: pLight was nullptr.");
+
+    lights[Index] = *pLight;
+
+    dirtyFlags |= dirtyFlags::vsConstants;
+    return D3D_OK;
+  }
+  HRESULT D3D9State::GetLight(DWORD Index, D3DLIGHT9* pLight) {
+    if (Index >= lights.size())
+      return log::d3derr(D3DERR_INVALIDCALL, "GetLight: light index %lu out of bounds.", Index);
+
+    if (pLight == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "GetLight: pLight was nullptr.");
+
+    *pLight = lights[Index];
+    return D3D_OK;
+  }
+  HRESULT D3D9State::LightEnable(DWORD Index, BOOL Enable) {
+    if (Index >= lights.size())
+      return log::d3derr(D3DERR_INVALIDCALL, "LightEnable: light index %lu out of bounds.", Index);
+
+    lightEnabled[Index] = Enable;
+
+    dirtyFlags |= dirtyFlags::vsConstants;
+    return D3D_OK;
+  }
+  HRESULT D3D9State::GetLightEnable(DWORD Index, BOOL* pEnable) {
+    if (Index >= lights.size())
+      return log::d3derr(D3DERR_INVALIDCALL, "GetLightEnable: light index %lu out of bounds.", Index);
+
+    if (pEnable == nullptr)
+      return log::d3derr(D3DERR_INVALIDCALL, "GetLightEnable: pEnable was nullptr.");
+
+    *pEnable = lightEnabled[Index];
+    return D3D_OK;
+  }
+
+  HRESULT D3D9State::SetFVF(DWORD fvf) {
+    this->fvf = fvf;
+
+    dirtyFlags |= dirtyFlags::vertexDecl;
+    dirtyFlags |= dirtyFlags::vsConstants;
     return D3D_OK;
   }
 
