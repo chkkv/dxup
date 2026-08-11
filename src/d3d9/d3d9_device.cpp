@@ -1008,7 +1008,7 @@ namespace dxup {
     return D3D_OK;
   }
   D3D9State* Direct3DDevice9Ex::GetEditState() {
-    if (m_stateBlock != nullptr)
+    if (m_stateBlock.ptr() != nullptr)
       return m_stateBlock->GetState();
 
     return m_state;
@@ -1016,9 +1016,10 @@ namespace dxup {
   HRESULT STDMETHODCALLTYPE Direct3DDevice9Ex::BeginStateBlock() {
     CriticalSection cs(this);
 
-    if (m_stateBlock != nullptr)
-      return log::d3derr(D3DERR_INVALIDCALL, "BeginStateBlock: attempted to begin a state block when one is already being recorded.");
-
+    // Some games call BeginStateBlock without properly ending the previous
+    // one and ignore the error return. Tolerate this by replacing the
+    // in-progress state block instead of failing, which would leave the
+    // game recording into a stale/null state and crash later.
     m_stateBlock = new Direct3DStateBlock9(this, 0);
     return D3D_OK;
   }
@@ -1029,8 +1030,11 @@ namespace dxup {
     if (ppSB == nullptr)
       return log::d3derr(D3DERR_INVALIDCALL, "EndStateBlock: ppSB was nullptrptr.");
 
+    // Some games call EndStateBlock without a matching BeginStateBlock and
+    // ignore the error. Return an empty state block instead of failing so
+    // the game does not abort on D3DERR_INVALIDCALL.
     if (m_stateBlock == nullptr)
-      return log::d3derr(D3DERR_INVALIDCALL, "EndStateBlock: no state block bound.");
+      m_stateBlock = new Direct3DStateBlock9(this, 0);
 
     *ppSB = ref(m_stateBlock);
     m_stateBlock = nullptr;

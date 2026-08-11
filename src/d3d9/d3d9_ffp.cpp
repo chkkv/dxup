@@ -62,11 +62,11 @@ namespace dxup {
         offset += size;
       };
 
-      if (fvf & D3DFVF_XYZW)
+      if ((fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZW)
         addElement(D3DDECLUSAGE_POSITIONT, 0, D3DDECLTYPE_FLOAT4, 16);
-      else if (fvf & D3DFVF_XYZRHW)
+      else if ((fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW)
         addElement(D3DDECLUSAGE_POSITIONT, 0, D3DDECLTYPE_FLOAT4, 16);
-      else if (fvf & D3DFVF_XYZ)
+      else if ((fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZ)
         addElement(D3DDECLUSAGE_POSITION, 0, D3DDECLTYPE_FLOAT3, 12);
 
       if (fvf & D3DFVF_NORMAL)
@@ -100,9 +100,16 @@ namespace dxup {
 "row_major float4x4 cWVP        : register(c0);\n"
 "float4   cLightDir   : register(c4);\n"
 "float4   cMatDiffuse : register(c5);\n"
-"float4   cAmbient    : register(c6);\n"
+"float4   cGlobalAmbient : register(c6);\n"
 "float4   cLightColor : register(c7);\n"
-"row_major float4x4 cWorld      : register(c8);\n"
+"row_major float4x4 cWorldView  : register(c8);\n"
+"float4   cSpotParams : register(c12);\n"
+"float4   cAttenuation: register(c13);\n"
+"float4   cSpotDir    : register(c14);\n"
+"float4   cLightAmbient : register(c15);\n"
+"float4   cMatAmbient : register(c16);\n"
+"float4   cEmissive   : register(c17);\n"
+"row_major float4x4 cNormalMatrix : register(c18);\n"
 "\n"
 "struct VSIn {\n"
 "#if HAS_RHW\n"
@@ -145,9 +152,44 @@ namespace dxup {
 "#endif\n"
 "\n"
 "#if HAS_NORMAL\n"
-"  float3 normalW = normalize(mul(input.normal, (float3x3)cWorld));\n"
-"  float nDotL = saturate(dot(normalW, -normalize(cLightDir.xyz)));\n"
-"  output.color.rgb *= (cAmbient.rgb + nDotL * cLightColor.rgb);\n"
+"  float3 normalV = mul(input.normal, (float3x3)cNormalMatrix);\n"
+"  float3 posV = mul(float4(input.pos, 1.0f), cWorldView).xyz;\n"
+"\n"
+"  float3 L;\n"
+"  float dist = 0.0f;\n"
+"  if (cLightDir.w < 0.5f)\n"
+"    L = normalize(-cLightDir.xyz);\n"
+"  else {\n"
+"    float3 lightVec = cLightDir.xyz - posV;\n"
+"    dist = length(lightVec);\n"
+"    L = lightVec / max(dist, 0.0001f);\n"
+"  }\n"
+"\n"
+"  if (cLightColor.w > 0.5f) {\n"
+"    float nDotL = saturate(dot(normalV, L));\n"
+"    float atten = 1.0f;\n"
+"\n"
+"    if (cLightDir.w >= 0.5f) {\n"
+"      if (cAttenuation.w > 0.0f && dist > cAttenuation.w)\n"
+"        atten = 0.0f;\n"
+"      else {\n"
+"        atten = 1.0f / (cAttenuation.x + cAttenuation.y * dist + cAttenuation.z * dist * dist);\n"
+"        atten = min(atten, 3.402823466e+38);\n"
+"        if (cSpotParams.w > 0.5f && cSpotParams.y > cSpotParams.x) {\n"
+"          float cosAng = dot(-L, normalize(cSpotDir.xyz));\n"
+"          if (cosAng < cSpotParams.x)\n"
+"            atten = 0.0f;\n"
+"          else if (cosAng <= cSpotParams.y)\n"
+"            atten *= pow(max((cosAng - cSpotParams.x) / max(cSpotParams.y - cSpotParams.x, 0.0001f), 0.0f), cSpotParams.z);\n"
+"        }\n"
+"      }\n"
+"    }\n"
+"\n"
+"    float3 ambSum = cGlobalAmbient.rgb + cLightAmbient.rgb * atten;\n"
+"    output.color.rgb = cEmissive.rgb\n"
+"      + cMatAmbient.rgb * ambSum\n"
+"      + output.color.rgb * (cLightColor.rgb * nDotL * atten);\n"
+"  }\n"
 "#endif\n"
 "\n"
 "#if HAS_TEX0\n"

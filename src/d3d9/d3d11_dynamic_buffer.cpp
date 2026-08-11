@@ -44,7 +44,7 @@ namespace dxup {
   uint32_t D3D11DynamicBuffer::update(ID3D11DeviceContext* context, const void* src, uint32_t length) {
     void* data;
     this->map(context, &data, length);
-    std::memcpy(&data, src, length);
+    std::memcpy(data, src, length);
     return this->unmap(context, length);
   }
 

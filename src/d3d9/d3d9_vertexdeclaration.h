@@ -48,6 +48,10 @@ namespace dxup {
       return m_d3d11Descs;
     }
 
+    const std::vector<D3DVERTEXELEMENT9>& GetD3D9Descs() const {
+      return m_d3d9Descs;
+    }
+
   private:
     std::vector<D3D11_INPUT_ELEMENT_DESC> m_d3d11Descs;
     std::vector<D3DVERTEXELEMENT9> m_d3d9Descs;

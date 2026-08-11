@@ -5,6 +5,7 @@
 #include "shaders/blit.ps.dxbc.h"
 
 #include <cfloat>
+#include <cmath>
 #include <utility>
 
 namespace dxup {
@@ -106,6 +107,7 @@ namespace dxup {
     const uint32_t newPrimitiveCount = PrimitiveCount * 3;
     const uint32_t length = newPrimitiveCount * sizeof(uint16_t);
 
+    log::warn("drawTriangleFan: indexed=%d prim=%d start=%d len=%d indexBuffer=%p", indexed ? 1 : 0, PrimitiveCount, StartIndex, length, (void*)m_state->indexBuffer.ptr());
     m_fanIndexBuffer.reserve(length);
 
     uint16_t* data = nullptr;
@@ -114,6 +116,24 @@ namespace dxup {
     if (indexed && m_state->indexBuffer != nullptr) {
       D3D11_MAPPED_SUBRESOURCE res;
       ID3D11Resource* originalIndexBuffer = m_state->indexBuffer->GetDXUPResource()->GetStaging();
+
+      // If there is no staging buffer available (e.g. the resource was created
+      // in a pool/usage combination that does not allocate one), fall back to
+      // unindexed fan expansion rather than crashing on a null Map target.
+      if (originalIndexBuffer == nullptr) {
+        for (UINT i = 0; i < PrimitiveCount; i++) {
+          data[3 * i + 0] = i + 1;
+          data[3 * i + 1] = i + 2;
+          data[3 * i + 2] = 0;
+        }
+        uint32_t fallbackOffset = m_fanIndexBuffer.unmap(m_context, length);
+        m_fanIndexed = indexed;
+        m_context->IASetIndexBuffer(m_fanIndexBuffer.getBuffer(), DXGI_FORMAT_R16_UINT, fallbackOffset);
+        HRESULT fallbackResult = DrawIndexedPrimitive(D3DPT_TRIANGLELIST, BaseVertexIndex, 0, PrimitiveCount + 2, 0, newPrimitiveCount);
+        m_state->dirtyFlags |= dirtyFlags::indexBuffer;
+        return fallbackResult;
+      }
+
       m_context->Map(originalIndexBuffer, 0, D3D11_MAP_READ, 0, &res);
 
       uint16_t* originalIndices = reinterpret_cast<uint16_t*>(res.pData);
@@ -334,6 +354,29 @@ namespace dxup {
     return m;
   }
 
+  // 3x3 matrix inverse (top-left of a 4x4 row-major matrix), for normal transformation.
+  static void inverseMatrix3(float* inv, const float* m) {
+    float det = m[0] * (m[4] * m[8] - m[5] * m[7])
+              - m[1] * (m[3] * m[8] - m[5] * m[6])
+              + m[2] * (m[3] * m[7] - m[4] * m[6]);
+    if (det == 0.0f) {
+      inv[0] = 1.0f; inv[1] = 0.0f; inv[2] = 0.0f;
+      inv[3] = 0.0f; inv[4] = 1.0f; inv[5] = 0.0f;
+      inv[6] = 0.0f; inv[7] = 0.0f; inv[8] = 1.0f;
+      return;
+    }
+    float invDet = 1.0f / det;
+    inv[0] =  (m[4] * m[8] - m[5] * m[7]) * invDet;
+    inv[1] = -(m[1] * m[8] - m[2] * m[7]) * invDet;
+    inv[2] =  (m[1] * m[5] - m[2] * m[4]) * invDet;
+    inv[3] = -(m[3] * m[8] - m[5] * m[6]) * invDet;
+    inv[4] =  (m[0] * m[8] - m[2] * m[6]) * invDet;
+    inv[5] = -(m[0] * m[5] - m[2] * m[3]) * invDet;
+    inv[6] =  (m[3] * m[7] - m[4] * m[6]) * invDet;
+    inv[7] = -(m[0] * m[7] - m[1] * m[6]) * invDet;
+    inv[8] =  (m[0] * m[4] - m[1] * m[3]) * invDet;
+  }
+
   HRESULT D3D9ImmediateRenderer::getFFPVS(const ffp::FFPVertexInputs& inputs, ID3D11VertexShader** outShader, ID3DBlob** outBytecode) {
     *outShader = nullptr;
     if (outBytecode != nullptr)
@@ -401,50 +444,138 @@ namespace dxup {
     m[8] = wvp._31; m[9] = wvp._32; m[10] = wvp._33; m[11] = wvp._34;
     m[12] = wvp._41; m[13] = wvp._42; m[14] = wvp._43; m[15] = wvp._44;
 
-    // c4: light direction in world space (points in the direction light travels)
+    // c4: light direction in view space (directional, w=0) or position in view space (point/spot, w=1)
+    // c12: spot params (cosPhi, cosTheta, falloff, isSpot)
+    // c13: attenuation (a0, a1, a2, range)
+    // c14: spot axis direction in view space
+    // c15: light ambient color
+    // c16: material ambient
+    // c17: material emissive
+    // c18-c20: normal matrix (inverse of view*world, 3x3)
     Vector<float, 4> lightDir = { 0.0f, 0.0f, -1.0f, 0.0f };
+    Vector<float, 4> spotParams = { -1.0f, -1.0f, 0.0f, 0.0f };
+    Vector<float, 4> spotDir = { 0.0f, 0.0f, -1.0f, 0.0f };
+    Vector<float, 4> attenParams = { 1.0f, 0.0f, 0.0f, 0.0f };
+    Vector<float, 4> lightAmbient = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+    const D3DLIGHT9* light = nullptr;
     for (uint32_t i = 0; i < m_state->lights.size(); i++) {
-      if (m_state->lightEnabled[i] && m_state->lights[i].Type == D3DLIGHT_DIRECTIONAL) {
-        lightDir = { m_state->lights[i].Direction.x, m_state->lights[i].Direction.y, m_state->lights[i].Direction.z, 0.0f };
+      if (m_state->lightEnabled[i]) {
+        light = &m_state->lights[i];
         break;
       }
     }
+
+    D3DMATRIX worldView = mulMatrix(m_state->worldMatrix, m_state->viewMatrix);
+
+    // Lights are specified in world space; only the view matrix transforms them
+    // into view space (D3D9 fixed-function lighting happens in view space).
+    const D3DMATRIX& view = m_state->viewMatrix;
+
+    if (light != nullptr) {
+      if (light->Type == D3DLIGHT_DIRECTIONAL) {
+        D3DVECTOR dir = light->Direction;
+        // Transform direction to view space (no translation).
+        Vector<float, 4> dirV = {
+          view._11 * dir.x + view._12 * dir.y + view._13 * dir.z,
+          view._21 * dir.x + view._22 * dir.y + view._23 * dir.z,
+          view._31 * dir.x + view._32 * dir.y + view._33 * dir.z,
+          0.0f
+        };
+        float len = std::sqrt(dirV[0] * dirV[0] + dirV[1] * dirV[1] + dirV[2] * dirV[2]);
+        if (len > 0.0f) {
+          dirV[0] /= len; dirV[1] /= len; dirV[2] /= len;
+        }
+        lightDir = dirV;
+      } else {
+        D3DVECTOR pos = light->Position;
+        Vector<float, 4> posV = {
+          view._11 * pos.x + view._12 * pos.y + view._13 * pos.z + view._14,
+          view._21 * pos.x + view._22 * pos.y + view._23 * pos.z + view._24,
+          view._31 * pos.x + view._32 * pos.y + view._33 * pos.z + view._34,
+          1.0f
+        };
+        lightDir = posV;
+
+        D3DVECTOR axis = light->Direction;
+        Vector<float, 4> axisV = {
+          view._11 * axis.x + view._12 * axis.y + view._13 * axis.z,
+          view._21 * axis.x + view._22 * axis.y + view._23 * axis.z,
+          view._31 * axis.x + view._32 * axis.y + view._33 * axis.z,
+          0.0f
+        };
+        float alen = std::sqrt(axisV[0] * axisV[0] + axisV[1] * axisV[1] + axisV[2] * axisV[2]);
+        if (alen > 0.0f) {
+          axisV[0] /= alen; axisV[1] /= alen; axisV[2] /= alen;
+        }
+        spotDir = axisV;
+
+        float a0 = light->Attenuation0;
+        float a1 = light->Attenuation1;
+        float a2 = light->Attenuation2;
+        if (a0 == 0.0f && a1 == 0.0f && a2 == 0.0f)
+          a0 = 1.0f;
+        attenParams = { a0, a1, a2, light->Range };
+
+        if (light->Type == D3DLIGHT_SPOT) {
+          float cosPhi = std::cos(light->Phi / 2.0f);
+          float cosTheta = std::cos(light->Theta / 2.0f);
+          spotParams = { cosPhi, cosTheta, light->Falloff, 1.0f };
+        }
+      }
+
+      lightAmbient = { light->Ambient.r, light->Ambient.g, light->Ambient.b, 0.0f };
+    }
     vs.floatConstants[4] = lightDir;
+    vs.floatConstants[12] = spotParams;
+    vs.floatConstants[13] = attenParams;
+    vs.floatConstants[14] = spotDir;
+    vs.floatConstants[15] = lightAmbient;
+    vs.floatConstants[16] = { mat.Ambient.r, mat.Ambient.g, mat.Ambient.b, mat.Ambient.a };
+    vs.floatConstants[17] = { mat.Emissive.r, mat.Emissive.g, mat.Emissive.b, 0.0f };
+
+    // c8-c11: world * view (for vertex position in view space)
+    float* wv = (float*)&vs.floatConstants[8];
+    wv[0] = worldView._11; wv[1] = worldView._12; wv[2] = worldView._13; wv[3] = worldView._14;
+    wv[4] = worldView._21; wv[5] = worldView._22; wv[6] = worldView._23; wv[7] = worldView._24;
+    wv[8] = worldView._31; wv[9] = worldView._32; wv[10] = worldView._33; wv[11] = worldView._34;
+    wv[12] = worldView._41; wv[13] = worldView._42; wv[14] = worldView._43; wv[15] = worldView._44;
+
+    // c18-c20: normal matrix = inverse(view * world), 3x3
+    float wvF[16];
+    float nm[9];
+    std::memcpy(wvF, wv, sizeof(wvF));
+    float wv33[9] = {
+      wvF[0], wvF[1], wvF[2],
+      wvF[4], wvF[5], wvF[6],
+      wvF[8], wvF[9], wvF[10]
+    };
+    inverseMatrix3(nm, wv33);
+    float* nmC = (float*)&vs.floatConstants[18];
+    nmC[0] = nm[0]; nmC[1] = nm[1]; nmC[2] = nm[2];
+    nmC[4] = nm[3]; nmC[5] = nm[4]; nmC[6] = nm[5];
+    nmC[8] = nm[6]; nmC[9] = nm[7]; nmC[10] = nm[8];
 
     // c5: material diffuse
     vs.floatConstants[5] = { mat.Diffuse.r, mat.Diffuse.g, mat.Diffuse.b, mat.Diffuse.a };
 
-    // c6: ambient, c7: light color
-    Vector<float, 4> ambient = { 1.0f, 1.0f, 1.0f, 0.0f };
+    // c6: global ambient (scene ambient), c7: light color (w = lighting switch)
+    Vector<float, 4> globalAmbient = { 0.0f, 0.0f, 0.0f, 0.0f };
     Vector<float, 4> lightColor = { 0.0f, 0.0f, 0.0f, 0.0f };
 
     if (lighting) {
       float a[4];
       convert::color(ambientState, a);
-      ambient = { a[0] * mat.Ambient.r, a[1] * mat.Ambient.g, a[2] * mat.Ambient.b, 0.0f };
+      globalAmbient = { a[0], a[1], a[2], 0.0f };
 
-      bool foundLight = false;
-      for (uint32_t i = 0; i < m_state->lights.size(); i++) {
-        if (m_state->lightEnabled[i]) {
-          lightColor = { m_state->lights[i].Diffuse.r, m_state->lights[i].Diffuse.g, m_state->lights[i].Diffuse.b, 0.0f };
-          foundLight = true;
-          break;
-        }
-      }
-
-      if (!foundLight)
-        lightColor = { 1.0f, 1.0f, 1.0f, 0.0f };
+      if (light != nullptr)
+        lightColor = { light->Diffuse.r, light->Diffuse.g, light->Diffuse.b, 1.0f };
+      else
+        lightColor = { 0.0f, 0.0f, 0.0f, 1.0f };
     }
 
-    vs.floatConstants[6] = ambient;
+    vs.floatConstants[6] = globalAmbient;
     vs.floatConstants[7] = lightColor;
-
-    // c8-c11: world matrix (for normal transformation)
-    float* w = (float*)&vs.floatConstants[8];
-    w[0] = m_state->worldMatrix._11; w[1] = m_state->worldMatrix._12; w[2] = m_state->worldMatrix._13; w[3] = m_state->worldMatrix._14;
-    w[4] = m_state->worldMatrix._21; w[5] = m_state->worldMatrix._22; w[6] = m_state->worldMatrix._23; w[7] = m_state->worldMatrix._24;
-    w[8] = m_state->worldMatrix._31; w[9] = m_state->worldMatrix._32; w[10] = m_state->worldMatrix._33; w[11] = m_state->worldMatrix._34;
-    w[12] = m_state->worldMatrix._41; w[13] = m_state->worldMatrix._42; w[14] = m_state->worldMatrix._43; w[15] = m_state->worldMatrix._44;
   }
 
   void D3D9ImmediateRenderer::updateVertexShaderAndInputLayout() {
@@ -483,10 +614,49 @@ namespace dxup {
       layout = m_state->vertexShader->GetLinkedInput(m_state->vertexDecl.ptr());
 
     if (layout == nullptr) {
-      HRESULT result = m_device->CreateInputLayout(&elements[0], elements.size(), bytecode, bytecodeSize, &layout);
+      // D3D9's POSITIONT (pre-transformed vertex) maps to D3D11's POSITION semantic.
+      // The translated shader declares its input as POSITION (SV_Position), so the
+      // input layout must use POSITION as well, otherwise CreateInputLayout fails
+      // with E_INVALIDARG due to a semantic name mismatch.
+      std::vector<D3D11_INPUT_ELEMENT_DESC> layoutElements(elements.begin(), elements.end());
+      for (D3D11_INPUT_ELEMENT_DESC& elem : layoutElements) {
+        if (std::strcmp(elem.SemanticName, "POSITIONT") == 0)
+          elem.SemanticName = "POSITION";
+      }
+
+      HRESULT result = m_device->CreateInputLayout(&layoutElements[0], layoutElements.size(), bytecode, bytecodeSize, &layout);
+
+      // If the input layout fails to create, the shader may declare more components
+      // than the vertex format provides (e.g. shader reads v2.xyzw but the declaration
+      // only has FLOAT2). D3D11 requires layout component count >= shader component count.
+      // Widen the element formats to 4 components and retry.
+      if (FAILED(result) && !ffp) {
+        std::vector<D3D11_INPUT_ELEMENT_DESC> widened(layoutElements.begin(), layoutElements.end());
+        for (D3D11_INPUT_ELEMENT_DESC& elem : widened) {
+          switch (elem.Format) {
+          case DXGI_FORMAT_R32_FLOAT: elem.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+          case DXGI_FORMAT_R32G32_FLOAT: elem.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+          case DXGI_FORMAT_R32G32B32_FLOAT: elem.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+          case DXGI_FORMAT_R16G16_UNORM: elem.Format = DXGI_FORMAT_R16G16B16A16_UNORM; break;
+          case DXGI_FORMAT_R16G16_SNORM: elem.Format = DXGI_FORMAT_R16G16B16A16_SNORM; break;
+          case DXGI_FORMAT_R8G8B8A8_UNORM: break;
+          case DXGI_FORMAT_B8G8R8A8_UNORM: break;
+          default: break;
+          }
+        }
+        HRESULT retry = m_device->CreateInputLayout(widened.data(), widened.size(), bytecode, bytecodeSize, &layout);
+        if (SUCCEEDED(retry)) {
+          result = retry;
+          log::warn("updateVertexShaderAndInputLayout: widened element formats and retried input layout.");
+        }
+      }
 
       if (FAILED(result)) {
-        log::warn("updateVertexShaderAndInputLayout: failed to create input layout.");
+        log::warn("updateVertexShaderAndInputLayout: failed to create input layout. hr=%08x elements=%d bytecode=%d", (unsigned)result, (int)elements.size(), (int)bytecodeSize);
+        for (uint32_t ei = 0; ei < elements.size(); ei++)
+          log::warn("  elem[%d]: %s idx=%d fmt=%d off=%d", ei, elements[ei].SemanticName, elements[ei].SemanticIndex, (int)elements[ei].Format, (int)elements[ei].AlignedByteOffset);
+        FILE* dbgf = fopen("shader_dump_vs.dxbc", "wb");
+        if (dbgf) { fwrite(bytecode, 1, bytecodeSize, dbgf); fclose(dbgf); log::warn("  dumped shader to shader_dump_vs.dxbc"); }
         return;
       }
 

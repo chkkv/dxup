@@ -391,6 +391,8 @@ namespace dxup {
       dirtyFlags |= dirtyFlags::blendState;
     else if (State == D3DRS_SRGBWRITEENABLE)
       dirtyFlags |= dirtyFlags::renderTargets;
+    else if (State == D3DRS_LIGHTING || State == D3DRS_AMBIENT)
+      dirtyFlags |= dirtyFlags::vsConstants;
     else
       log::warn("Unhandled render state: %lu", State);
 
@@ -903,11 +905,12 @@ namespace dxup {
     textureStageStateCaptures[stage][type] = true;
   }
   void D3D9State::captureSamplerState(uint32_t sampler, D3DSAMPLERSTATETYPE type, bool recapture) {
-    if (recapture && samplerStateCaptures[sampler][type] == false)
-      return;
-
     uint32_t internalSampler = 0;
     convert::mapStageToSampler(sampler, &internalSampler);
+
+    if (recapture && samplerStateCaptures[internalSampler][type] == false)
+      return;
+
     m_device->GetSamplerState(sampler, type, &samplerStates[internalSampler][type]);
     samplerStateCaptures[internalSampler][type] = true;
   }
