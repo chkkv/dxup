@@ -4,7 +4,13 @@
  * Draws a rubik's cube (3x3x3, standard face colours) using the D3D9
  * fixed-function pipeline (FVF + SetTransform + DrawPrimitiveUP) and
  * rotates it clockwise around the Y axis. Each sticker is drawn as a
- * filled square with a white border.
+ * filled square with a white border. A single directional light is
+ * placed up-right-back from the camera so lighting can be compared
+ * between native D3D9 and DXUP.
+ *
+ * Usage: test_d3d.exe [-runtotick N]
+ *   -runtotick N : freeze the rotation after N frames (used to compare
+ *                  per-face brightness across implementations)
  *
  * Build (mingw-w64):
  *   x86_64-w64-mingw32-g++ test_d3d.cpp -o test_d3d.exe -ld3d9 -lgdi32 -luser32 -O2 -mwindows
@@ -19,8 +25,14 @@
 
 typedef struct {
   float x, y, z;
+  float nx, ny, nz;
   DWORD color;
 } Vertex;
+
+typedef struct {
+  float x, y, z;
+  DWORD color;
+} HUDVertex;
 
 static IDirect3D9* g_pD3D = NULL;
 static IDirect3DDevice9* g_pDevice = NULL;
@@ -38,6 +50,11 @@ static int g_lineCount = 0;
 static DWORD g_lastFpsTime = 0;
 static int g_frameCount = 0;
 static int g_fps = 0;
+
+static int g_tick = 0;
+static int g_runToTick = -1;
+static int g_frozen = 0;
+static float g_frozenAngle = 0.0f;
 
 /* ---- Matrix helpers (row-major, D3DX-compatible) ---- */
 
@@ -171,6 +188,9 @@ static void faceCorners(float corner[4][3], float h, int axis, int sign) {
 static void addQuadFill(Vertex* verts, int* vertCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
   float corner[4][3];
   int order[6] = { 0, 1, 2, 0, 2, 3 };
+  float nx = axis == 0 ? (float)sign : 0.0f;
+  float ny = axis == 1 ? (float)sign : 0.0f;
+  float nz = axis == 2 ? (float)sign : 0.0f;
   int i;
 
   faceCorners(corner, h, axis, sign);
@@ -186,6 +206,9 @@ static void addQuadFill(Vertex* verts, int* vertCount, float cx, float cy, float
     verts[*vertCount + i].x = cx + corner[c][0];
     verts[*vertCount + i].y = cy + corner[c][1];
     verts[*vertCount + i].z = cz + corner[c][2];
+    verts[*vertCount + i].nx = nx;
+    verts[*vertCount + i].ny = ny;
+    verts[*vertCount + i].nz = nz;
     verts[*vertCount + i].color = color;
   }
   (*vertCount) += 6;
@@ -194,6 +217,9 @@ static void addQuadFill(Vertex* verts, int* vertCount, float cx, float cy, float
 static void addQuadBorder(Vertex* verts, int* vertCount, float cx, float cy, float cz, float h, int axis, int sign, DWORD color) {
   float corner[4][3];
   int edges[8] = { 0, 1, 1, 2, 2, 3, 3, 0 };
+  float nx = axis == 0 ? (float)sign : 0.0f;
+  float ny = axis == 1 ? (float)sign : 0.0f;
+  float nz = axis == 2 ? (float)sign : 0.0f;
   int i;
 
   faceCorners(corner, h, axis, sign);
@@ -203,6 +229,9 @@ static void addQuadBorder(Vertex* verts, int* vertCount, float cx, float cy, flo
     verts[*vertCount + i].x = cx + corner[c][0];
     verts[*vertCount + i].y = cy + corner[c][1];
     verts[*vertCount + i].z = cz + corner[c][2];
+    verts[*vertCount + i].nx = nx;
+    verts[*vertCount + i].ny = ny;
+    verts[*vertCount + i].nz = nz;
     verts[*vertCount + i].color = color;
   }
   (*vertCount) += 8;
@@ -274,7 +303,7 @@ static const unsigned char* getGlyph(char c) {
   return glyphs[0];
 }
 
-static void addScreenQuad(Vertex* verts, int* vertCount, float x, float y, float size, DWORD color) {
+static void addScreenQuad(HUDVertex* verts, int* vertCount, float x, float y, float size, DWORD color) {
   int i = *vertCount;
   verts[i + 0].x = x;         verts[i + 0].y = y;         verts[i + 0].z = 0.0f; verts[i + 0].color = color;
   verts[i + 1].x = x + size;  verts[i + 1].y = y;         verts[i + 1].z = 0.0f; verts[i + 1].color = color;
@@ -286,7 +315,7 @@ static void addScreenQuad(Vertex* verts, int* vertCount, float x, float y, float
 }
 
 static void drawHUD(void) {
-  static Vertex hudVerts[16 * 35 * 6];
+  static HUDVertex hudVerts[16 * 35 * 6];
   D3DMATRIX proj, view, world;
   RECT rc;
   char buf[16];
@@ -323,18 +352,60 @@ static void drawHUD(void) {
   g_pDevice->SetTransform(D3DTS_VIEW, &view);
   g_pDevice->SetTransform(D3DTS_WORLD, &world);
 
+  /* HUD has no normals; force lighting off so colours pass through. */
+  g_pDevice->SetRenderState(D3DRS_LIGHTING, FALSE);
   g_pDevice->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
-  g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, vertCount / 3, hudVerts, sizeof(Vertex));
+  g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, vertCount / 3, hudVerts, sizeof(HUDVertex));
+}
+
+static void initLight(void) {
+  D3DMATERIAL9 mat;
+  D3DLIGHT9 light;
+
+  ZeroMemory(&mat, sizeof(mat));
+  mat.Diffuse.r = 1.0f; mat.Diffuse.g = 1.0f; mat.Diffuse.b = 1.0f; mat.Diffuse.a = 1.0f;
+  mat.Ambient.r = 1.0f; mat.Ambient.g = 1.0f; mat.Ambient.b = 1.0f; mat.Ambient.a = 1.0f;
+  g_pDevice->SetMaterial(&mat);
+
+  ZeroMemory(&light, sizeof(light));
+  light.Type = D3DLIGHT_DIRECTIONAL;
+  light.Diffuse.r = 0.65f; light.Diffuse.g = 0.65f; light.Diffuse.b = 0.65f;
+  light.Specular.r = 0.0f; light.Specular.g = 0.0f; light.Specular.b = 0.0f;
+  light.Ambient.r = 0.35f; light.Ambient.g = 0.35f; light.Ambient.b = 0.35f;
+
+  /* Directional light arriving from the upper-right-back of the camera,
+   * pointing towards the cube centre: travel direction is (-1,-1,-1)/sqrt(3). */
+  light.Direction.x = -0.577350f;
+  light.Direction.y = -0.577350f;
+  light.Direction.z = -0.577350f;
+
+  g_pDevice->SetLight(0, &light);
+  g_pDevice->LightEnable(0, TRUE);
 }
 
 static void renderFrame(void) {
-  float angle = (float)GetTickCount() / 1000.0f;
+  float angle;
   RECT rc;
   float aspect;
   D3DMATRIX proj, view, world;
   D3DVECTOR eye = { 0.0f, 2.2f, 4.5f };
   D3DVECTOR at  = { 0.0f, 0.0f, 0.0f };
   D3DVECTOR up  = { 0.0f, 1.0f, 0.0f };
+
+  if (g_runToTick >= 0) {
+    if (g_tick >= g_runToTick) {
+      if (!g_frozen) {
+        g_frozen = 1;
+        g_frozenAngle = (float)g_tick * 0.02f;
+      }
+      angle = g_frozenAngle;
+    } else {
+      angle = (float)g_tick * 0.02f;
+    }
+    g_tick++;
+  } else {
+    angle = (float)GetTickCount() / 1000.0f;
+  }
 
   GetClientRect(g_hWnd, &rc);
   aspect = rc.right > 0 && rc.bottom > 0 ? (float)rc.right / (float)rc.bottom : 1.0f;
@@ -343,7 +414,7 @@ static void renderFrame(void) {
 
   g_pDevice->BeginScene();
 
-  g_pDevice->SetRenderState(D3DRS_LIGHTING, FALSE);
+  g_pDevice->SetRenderState(D3DRS_LIGHTING, TRUE);
   g_pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
   g_pDevice->SetRenderState(D3DRS_ZENABLE, TRUE);
   g_pDevice->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
@@ -359,7 +430,7 @@ static void renderFrame(void) {
   matRotY(&world, -angle);
   g_pDevice->SetTransform(D3DTS_WORLD, &world);
 
-  g_pDevice->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
+  g_pDevice->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE);
   g_pDevice->DrawPrimitiveUP(D3DPT_TRIANGLELIST, g_triCount, g_fillVerts, sizeof(Vertex));
   g_pDevice->DrawPrimitiveUP(D3DPT_LINELIST, g_lineCount, g_borderVerts, sizeof(Vertex));
 
@@ -413,6 +484,7 @@ static HRESULT initD3D(HWND hWnd) {
   }
 
   buildRubiksCube();
+  initLight();
   return S_OK;
 }
 
@@ -424,10 +496,25 @@ static void cleanup(void) {
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
   WNDCLASSA wc;
   MSG msg;
+  LPSTR p = lpCmdLine;
 
   (void)hPrevInstance;
-  (void)lpCmdLine;
   (void)nCmdShow;
+
+  /* Parse "-runtotick N": freeze rotation after N frames. */
+  while (p != NULL && *p != '\0') {
+    while (*p == ' ' || *p == '\t')
+      p++;
+    if (_strnicmp(p, "-runtotick", 10) == 0) {
+      p += 10;
+      while (*p == ' ' || *p == '\t')
+        p++;
+      if (*p != '\0')
+        g_runToTick = atoi(p);
+    }
+    while (*p != '\0' && *p != ' ')
+      p++;
+  }
 
   memset(&wc, 0, sizeof(wc));
   wc.style = CS_HREDRAW | CS_VREDRAW;
