@@ -1,4 +1,5 @@
 #include "d3d9_state.h"
+#include "d3d9_ffp.h"
 #include "d3d9_util.h"
 #include "d3d9_texture.h"
 
@@ -100,6 +101,18 @@ namespace dxup {
       this->captureScissor(recapture);
       //captureClipPlanes(recapture);
 
+      // Transform matrices are required by state block apply (e.g. D3DX
+      // font/sprite rendering captures the device state and restores it
+      // afterwards; without restoring the matrices, HUD elements inherit
+      // stale scene transforms and rotate with the world matrix).
+      D3DMATRIX mtx;
+      m_device->GetTransform(D3DTS_WORLD, &mtx);
+      worldMatrix = mtx;
+      m_device->GetTransform(D3DTS_VIEW, &mtx);
+      viewMatrix = mtx;
+      m_device->GetTransform(D3DTS_PROJECTION, &mtx);
+      projMatrix = mtx;
+
       // There is more crap here too!
     }
   }
@@ -109,6 +122,18 @@ namespace dxup {
 
     if (scissorRectCaptured)
       m_device->SetScissorRect(&scissorRect);
+
+    m_device->SetTransform(D3DTS_WORLD, &worldMatrix);
+    m_device->SetTransform(D3DTS_VIEW, &viewMatrix);
+    m_device->SetTransform(D3DTS_PROJECTION, &projMatrix);
+
+    forEachSampler([&](DWORD i) {
+      DWORD sampler = 0;
+      convert::mapStageToSampler(i, &sampler);
+
+      if (textureCaptured[sampler])
+        m_device->SetTexture(i, textures[sampler]);
+    });
 
     if (vertexShaderCaptured)
       m_device->SetVertexShader(vertexShader.ptr());
@@ -881,6 +906,16 @@ namespace dxup {
 
   HRESULT D3D9State::SetFVF(DWORD fvf) {
     this->fvf = fvf;
+
+    // FVF-based draws (e.g. D3DX sprite/font rendering) must resolve to a
+    // vertex declaration so the renderer can build a matching input layout,
+    // otherwise the previously bound layout (and its world transform) leaks
+    // into these draws, making HUD elements rotate/misplace with the scene.
+    std::vector<D3D11_INPUT_ELEMENT_DESC> d3d11Descs;
+    std::vector<D3DVERTEXELEMENT9> d3d9Descs;
+    ffp::buildFVFDeclaration(fvf, d3d11Descs, d3d9Descs);
+    vertexDecl = new Direct3DVertexDeclaration9(m_device, d3d11Descs, d3d9Descs);
+    vertexDeclCaptured = true;
 
     dirtyFlags |= dirtyFlags::vertexDecl;
     dirtyFlags |= dirtyFlags::vsConstants;

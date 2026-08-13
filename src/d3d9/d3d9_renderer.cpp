@@ -466,49 +466,30 @@ namespace dxup {
       }
     }
 
-    D3DMATRIX worldView = mulMatrix(m_state->worldMatrix, m_state->viewMatrix);
-
-    // Lights are specified in world space; only the view matrix transforms them
-    // into view space (D3D9 fixed-function lighting happens in view space).
-    const D3DMATRIX& view = m_state->viewMatrix;
-
+    // D3D9 fixed-function lighting is computed in WORLD space (verified
+    // against wined3d): light position/direction are used as-is, vertices
+    // and normals are transformed by the world matrix only. Using view
+    // space instead changes nDotL whenever the world matrix rotates.
     if (light != nullptr) {
       if (light->Type == D3DLIGHT_DIRECTIONAL) {
         D3DVECTOR dir = light->Direction;
-        // Transform direction to view space (no translation).
-        Vector<float, 4> dirV = {
-          view._11 * dir.x + view._12 * dir.y + view._13 * dir.z,
-          view._21 * dir.x + view._22 * dir.y + view._23 * dir.z,
-          view._31 * dir.x + view._32 * dir.y + view._33 * dir.z,
-          0.0f
-        };
-        float len = std::sqrt(dirV[0] * dirV[0] + dirV[1] * dirV[1] + dirV[2] * dirV[2]);
+        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+        Vector<float, 4> dirW = { dir.x, dir.y, dir.z, 0.0f };
         if (len > 0.0f) {
-          dirV[0] /= len; dirV[1] /= len; dirV[2] /= len;
+          dirW[0] /= len; dirW[1] /= len; dirW[2] /= len;
         }
-        lightDir = dirV;
+        lightDir = dirW;
       } else {
         D3DVECTOR pos = light->Position;
-        Vector<float, 4> posV = {
-          view._11 * pos.x + view._12 * pos.y + view._13 * pos.z + view._14,
-          view._21 * pos.x + view._22 * pos.y + view._23 * pos.z + view._24,
-          view._31 * pos.x + view._32 * pos.y + view._33 * pos.z + view._34,
-          1.0f
-        };
-        lightDir = posV;
+        lightDir = { pos.x, pos.y, pos.z, 1.0f };
 
         D3DVECTOR axis = light->Direction;
-        Vector<float, 4> axisV = {
-          view._11 * axis.x + view._12 * axis.y + view._13 * axis.z,
-          view._21 * axis.x + view._22 * axis.y + view._23 * axis.z,
-          view._31 * axis.x + view._32 * axis.y + view._33 * axis.z,
-          0.0f
-        };
-        float alen = std::sqrt(axisV[0] * axisV[0] + axisV[1] * axisV[1] + axisV[2] * axisV[2]);
+        float alen = std::sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+        Vector<float, 4> axisW = { axis.x, axis.y, axis.z, 0.0f };
         if (alen > 0.0f) {
-          axisV[0] /= alen; axisV[1] /= alen; axisV[2] /= alen;
+          axisW[0] /= alen; axisW[1] /= alen; axisW[2] /= alen;
         }
-        spotDir = axisV;
+        spotDir = axisW;
 
         float a0 = light->Attenuation0;
         float a1 = light->Attenuation1;
@@ -534,27 +515,19 @@ namespace dxup {
     vs.floatConstants[16] = { mat.Ambient.r, mat.Ambient.g, mat.Ambient.b, mat.Ambient.a };
     vs.floatConstants[17] = { mat.Emissive.r, mat.Emissive.g, mat.Emissive.b, 0.0f };
 
-    // c8-c11: world * view (for vertex position in view space)
+    // c8-c11: world matrix (for vertex position / normal in world space)
+    const D3DMATRIX& world = m_state->worldMatrix;
     float* wv = (float*)&vs.floatConstants[8];
-    wv[0] = worldView._11; wv[1] = worldView._12; wv[2] = worldView._13; wv[3] = worldView._14;
-    wv[4] = worldView._21; wv[5] = worldView._22; wv[6] = worldView._23; wv[7] = worldView._24;
-    wv[8] = worldView._31; wv[9] = worldView._32; wv[10] = worldView._33; wv[11] = worldView._34;
-    wv[12] = worldView._41; wv[13] = worldView._42; wv[14] = worldView._43; wv[15] = worldView._44;
+    wv[0] = world._11; wv[1] = world._12; wv[2] = world._13; wv[3] = world._14;
+    wv[4] = world._21; wv[5] = world._22; wv[6] = world._23; wv[7] = world._24;
+    wv[8] = world._31; wv[9] = world._32; wv[10] = world._33; wv[11] = world._34;
+    wv[12] = world._41; wv[13] = world._42; wv[14] = world._43; wv[15] = world._44;
 
-    // c18-c20: normal matrix = inverse(view * world), 3x3
-    float wvF[16];
-    float nm[9];
-    std::memcpy(wvF, wv, sizeof(wvF));
-    float wv33[9] = {
-      wvF[0], wvF[1], wvF[2],
-      wvF[4], wvF[5], wvF[6],
-      wvF[8], wvF[9], wvF[10]
-    };
-    inverseMatrix3(nm, wv33);
+    // c18-c20: world matrix 3x3 (D3D9 transforms normals with the world matrix)
     float* nmC = (float*)&vs.floatConstants[18];
-    nmC[0] = nm[0]; nmC[1] = nm[1]; nmC[2] = nm[2];
-    nmC[4] = nm[3]; nmC[5] = nm[4]; nmC[6] = nm[5];
-    nmC[8] = nm[6]; nmC[9] = nm[7]; nmC[10] = nm[8];
+    nmC[0] = world._11; nmC[1] = world._12; nmC[2] = world._13;
+    nmC[4] = world._21; nmC[5] = world._22; nmC[6] = world._23;
+    nmC[8] = world._31; nmC[9] = world._32; nmC[10] = world._33;
 
     // c5: material diffuse
     vs.floatConstants[5] = { mat.Diffuse.r, mat.Diffuse.g, mat.Diffuse.b, mat.Diffuse.a };
